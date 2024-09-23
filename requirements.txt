@@ -1,0 +1,7 @@
+
+psutil
+pynput
+pyautogui
+opencv-python
+numpy
+scapy
