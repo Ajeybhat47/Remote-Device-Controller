@@ -11,13 +11,16 @@ import pyautogui
 
 import psutil
 from scapy.all import ARP, Ether, srp
-import time
 
 # define the MAC address of the device you're looking for
 target_mac = "00:00:00:00:00:00"
 target_mac2 = "00:00:00:00:00:00"
 
 HOST = 'localhost'
+
+# these will be updated once we connect to the server
+SERVER_WIDTH = 1920
+SERVER_HEIGHT = 1080
 
 with os.popen('arp -a') as f:
     Arp_data = f.read()
@@ -83,6 +86,14 @@ s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.connect((HOST, PORT))
 print('Connected to server')
 
+# receive screen resolution from server
+width_bytes = s.recv(4)
+height_bytes = s.recv(4)
+if width_bytes and height_bytes:
+    SERVER_WIDTH = int.from_bytes(width_bytes, byteorder='big')
+    SERVER_HEIGHT = int.from_bytes(height_bytes, byteorder='big')
+print(f'Server screen size: {SERVER_WIDTH}x{SERVER_HEIGHT}')
+
 
 STOP_BUTTON = 0
 Button_state = 0  # 0-no click 1-left click 2-right click
@@ -101,6 +112,7 @@ def send_mouse_coords(conn):
 
     global STOP_BUTTON
     global Button_state
+    global SERVER_WIDTH, SERVER_HEIGHT
     global win_x
     global win_y
     global win_width
@@ -115,10 +127,10 @@ def send_mouse_coords(conn):
         x, y = pyautogui.position()
 
         try:
-            msg = "|"+str((x-win_x)/(win_width/1920))+":" + \
-                str((y-win_y)/(win_height/1080))+":"+str(Button_state)+"|"
-            # print(msg)
-        except:
+            remote_x = (x - win_x) * SERVER_WIDTH / win_width
+            remote_y = (y - win_y) * SERVER_HEIGHT / win_height
+            msg = f"|{remote_x}:{remote_y}:{Button_state}|"
+        except Exception:
             pass
         # print(msg.encode())
         s.sendall(msg.encode())
@@ -131,6 +143,7 @@ def send_mouse_coords(conn):
 def clicking(conn):
     global STOP_BUTTON
     global Button_state
+    global SERVER_WIDTH, SERVER_HEIGHT
 
     if STOP_BUTTON:
         return
@@ -138,6 +151,7 @@ def clicking(conn):
     def on_click(x, y, button, pressed):
         global STOP_BUTTON
         global Button_state
+        global SERVER_WIDTH, SERVER_HEIGHT
 
         if STOP_BUTTON:
             return
@@ -159,10 +173,11 @@ def clicking(conn):
                 Button_state = 0
 
             try:
-                msg = "|"+str((x-win_x)/(win_width/1920))+":" + \
-                    str((y-win_y)/(win_height/1080))+":"+str(Button_state)+"|"
+                remote_x = (x - win_x) * SERVER_WIDTH / win_width
+                remote_y = (y - win_y) * SERVER_HEIGHT / win_height
+                msg = f"|{remote_x}:{remote_y}:{Button_state}|"
                 print(msg)
-            except:
+            except Exception:
                 pass
             # print(msg.encode())
             s.sendall(msg.encode())
@@ -177,12 +192,14 @@ def clicking(conn):
 def receive_video_data(conn):
     # Create a buffer to hold the received video data
     global STOP_BUTTON
+    global SERVER_WIDTH, SERVER_HEIGHT
 
     global win_x
     global win_y
     global win_width
     global win_height
     cv2.namedWindow('Screen', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('Screen', SERVER_WIDTH, SERVER_HEIGHT)
 
     win_x = cv2.getWindowImageRect("Screen")[0]
     win_y = cv2.getWindowImageRect("Screen")[1]
@@ -215,8 +232,11 @@ def receive_video_data(conn):
         img = cv2.imdecode(np.frombuffer(
             buffer, dtype=np.uint8), cv2.IMREAD_COLOR)
 
+        # Resize to current window size for smoother display
+        display_img = cv2.resize(img, (win_width, win_height))
+
         # Display the image
-        cv2.imshow('Screen', img)
+        cv2.imshow('Screen', display_img)
         # cv2.waitKey(1)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):

@@ -9,6 +9,10 @@ import pyautogui
 HOST = '0.0.0.0'  # IP address of the server
 PORT = 8000         # Port to listen on
 
+# default screen dimensions will be updated after connection
+SCREEN_WIDTH = 1920
+SCREEN_HEIGHT = 1080
+
 
 # pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
@@ -32,11 +36,21 @@ s.listen(10)
 conn, addr = s.accept()
 print(f'Connected by {addr}')
 
+# Determine screen resolution and send it to the client
+with mss.mss() as monitor:
+    MON_INFO = monitor.monitors[1]
+    SCREEN_WIDTH = MON_INFO['width']
+    SCREEN_HEIGHT = MON_INFO['height']
+
+conn.sendall(SCREEN_WIDTH.to_bytes(4, byteorder='big'))
+conn.sendall(SCREEN_HEIGHT.to_bytes(4, byteorder='big'))
+
 # Create a monitor instance for screen recording
 
 
 def send_screen(conn):
 
+    global SCREEN_WIDTH, SCREEN_HEIGHT
     with mss.mss() as monitor:
 
         while True:
@@ -47,7 +61,9 @@ def send_screen(conn):
             img = np.array(screenshot)
 
             # Convert the image to JPEG format for compression
-            encoded, buffer = cv2.imencode('.jpg', img)
+            # reduce quality slightly to improve bandwidth usage
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 50]
+            encoded, buffer = cv2.imencode('.jpg', img, encode_param)
 
             # Send the size of the JPEG buffer to the client
             size = len(buffer)
@@ -58,35 +74,37 @@ def send_screen(conn):
 
 
 def receive_mouse_input(conn):
+    global SCREEN_WIDTH, SCREEN_HEIGHT
+    buffer = ''
     while True:
         # receive mouse input coordinates from client
         data = conn.recv(1024).decode()
         if not data:
             break
-        print(data)
-        data = data.split("|")
-        data = data[1]
-        try:
-            x, y, z = data.split(':')
-            x = float(x)
-            y = float(y)
-            z = int(z)
-            if x > 0 and x < 1920:
-                if y > 0 and y < 1080:
-                    pass
-                    print("moved to", x, y)
+        buffer += data
+
+        while '|' in buffer:
+            start = buffer.find('|')
+            end = buffer.find('|', start + 1)
+            if end == -1:
+                break
+            chunk = buffer[start + 1:end]
+            buffer = buffer[end + 1:]
+            try:
+                x, y, z = chunk.split(':')
+                x = float(x)
+                y = float(y)
+                z = int(z)
+                if 0 <= x <= SCREEN_WIDTH and 0 <= y <= SCREEN_HEIGHT:
                     pyautogui.moveTo(round(x), round(y))
-                    if (z == 0):
+                    if z == 0:
                         pyautogui.mouseUp(button="left")
-                        # pyautogui.mouseUp(button="right")
-                    elif (z == 1):
-                        # print("click")
+                    elif z == 1:
                         pyautogui.mouseDown(button="left")
-                    elif (z == 2):
-                        pyautogui.click(
-                            button="right", clicks=1, interval=0.25)
-        except:
-            print("error in coordinates")
+                    elif z == 2:
+                        pyautogui.click(button="right", clicks=1, interval=0.25)
+            except Exception as e:
+                print("error in coordinates", e)
 
 
 # function to handle client connections
