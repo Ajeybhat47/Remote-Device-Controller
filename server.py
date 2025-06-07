@@ -58,35 +58,56 @@ def send_screen(conn):
 
 
 def receive_mouse_input(conn):
+    """Receive and process mouse input from the client.
+
+    The original implementation assumed that one ``recv`` call would return a
+    complete message of the form ``|x:y:z|``. TCP is a stream protocol so this
+    assumption can lead to truncated or combined messages which then cause
+    ``ValueError`` exceptions when splitting the string.  This implementation
+    accumulates data in a buffer and extracts messages framed by the ``|``
+    character.
+    """
+
+    buffer = ""
     while True:
-        # receive mouse input coordinates from client
-        data = conn.recv(1024).decode()
-        if not data:
+        chunk = conn.recv(1024).decode()
+        if not chunk:
             break
-        print(data)
-        data = data.split("|")
-        data = data[1]
-        try:
-            x, y, z = data.split(':')
-            x = float(x)
-            y = float(y)
-            z = int(z)
-            if x > 0 and x < 1920:
-                if y > 0 and y < 1080:
-                    pass
-                    print("moved to", x, y)
+        buffer += chunk
+
+        while True:
+            start = buffer.find("|")
+            if start == -1:
+                # no start delimiter found yet
+                buffer = ""
+                break
+            end = buffer.find("|", start + 1)
+            if end == -1:
+                # incomplete message, keep the partial data
+                buffer = buffer[start:]
+                break
+
+            # extract message without delimiters
+            msg = buffer[start + 1:end]
+            buffer = buffer[end + 1:]
+
+            try:
+                x_str, y_str, z_str = msg.split(":")
+                x = float(x_str)
+                y = float(y_str)
+                z = int(z_str)
+
+                if 0 < x < 1920 and 0 < y < 1080:
                     pyautogui.moveTo(round(x), round(y))
-                    if (z == 0):
+                    if z == 0:
                         pyautogui.mouseUp(button="left")
-                        # pyautogui.mouseUp(button="right")
-                    elif (z == 1):
-                        # print("click")
+                    elif z == 1:
                         pyautogui.mouseDown(button="left")
-                    elif (z == 2):
+                    elif z == 2:
                         pyautogui.click(
                             button="right", clicks=1, interval=0.25)
-        except:
-            print("error in coordinates")
+            except Exception:
+                print("error in coordinates")
 
 
 # function to handle client connections
