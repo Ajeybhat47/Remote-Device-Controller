@@ -1,95 +1,88 @@
-import re
+"""Client for controlling a remote machine via mouse and screen share."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
 import os
-from pynput.mouse import Listener, Button
+import re
 import socket
-import cv2
-import numpy as np
 import threading
 import time
-import pyautogui
 
-
+import cv2
+import numpy as np
 import psutil
+import pyautogui
+from pynput.mouse import Button, Listener
 from scapy.all import ARP, Ether, srp
-import time
 
-# define the MAC address of the device you're looking for
-target_mac = "00:00:00:00:00:00"
-target_mac2 = "00:00:00:00:00:00"
 
-HOST = 'localhost'
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
-with os.popen('arp -a') as f:
-    Arp_data = f.read()
-Arp_table = []
-for line in re.findall('([-.0-9]+)\s+([-0-9a-f]{17})', Arp_data):
-    Arp_table.append(line)
-    if (target_mac2 == line[1]):
-        print("target's ip address found in ARP table")
-        HOST = line[0]
 
-if (HOST == 'localhost'):
-    print("Could not find in ARP table")
-    # get the IP address and netmask of the WiFi interface that's currently in use
+def _discover_host(target_mac: str, alt_mac: str) -> str:
+    """Attempt to discover the host IP using the ARP table or network scan."""
+
+    host = "localhost"
+    with os.popen("arp -a") as f:
+        arp_data = f.read()
+
+    for ip_addr, mac in re.findall(r"([-.0-9]+)\s+([-0-9a-f]{17})", arp_data):
+        if mac.lower() == alt_mac.lower():
+            logging.info("Found %s in ARP table", mac)
+            return ip_addr
+
+    logging.info("Could not find device in ARP table; scanning network")
+
     addrs = psutil.net_if_addrs()
-    # print(addrs)
-    interface = [i for i in addrs if i.startswith(
-        'Wi-Fi')][0]  # assuming WiFi interface
-    ip_address = addrs[interface][1].address
-    netmask = addrs[interface][1].netmask
+    interface = [i for i in addrs if i.startswith("Wi-Fi")]
+    if not interface:
+        logging.warning("Wi-Fi interface not found; using localhost")
+        return host
 
-    # calculate the network address from the IP address and netmask
-    ip_address_bytes = [int(x) for x in ip_address.split('.')]
-    netmask_bytes = [int(x) for x in netmask.split('.')]
-    network_address_bytes = [ip_address_bytes[i]
-                             & netmask_bytes[i] for i in range(4)]
-    network_address = '.'.join([str(x) for x in network_address_bytes])
+    iface = interface[0]
+    ip_address = addrs[iface][1].address
+    netmask = addrs[iface][1].netmask
 
-    print("network=", network_address)
+    ip_bytes = [int(x) for x in ip_address.split(".")]
+    mask_bytes = [int(x) for x in netmask.split(".")]
+    network_bytes = [ip_bytes[i] & mask_bytes[i] for i in range(4)]
+    network_address = ".".join(str(x) for x in network_bytes)
 
-    # ans, unans = srp(Ether(dst="ff:ff:ff:ff:ff:ff") /
-    #                  ARP(pdst="192.168.1.0/24"), timeout=2)
-
-    # create an ARP request packet to send to the local network
     arp = ARP(op=1, pdst=f"{network_address}/24", hwdst="ff:ff:ff:ff:ff:ff")
-    ether = Ether(dst="ff:ff:ff:ff:ff:ff")
-    packet = ether/arp
-
-    # send the packet and capture the response
+    packet = Ether(dst="ff:ff:ff:ff:ff:ff") / arp
     result = srp(packet, timeout=5, verbose=0)[0]
 
-    # iterate over the responses and check if any of them match the target MAC address
-    for sent, received in result:
-        print(received.hwsrc, received.psrc)
-        if received.hwsrc == target_mac:
-            print("IP address of MAC address {} is {}".format(
-                target_mac, received.psrc))
-            HOST = str(received.psrc)
+    for _, received in result:
+        logging.debug("%s %s", received.hwsrc, received.psrc)
+        if received.hwsrc.lower() == target_mac.lower():
+            logging.info("Found host %s for MAC %s", received.psrc, target_mac)
+            return str(received.psrc)
+
+    logging.warning("Device not found; falling back to localhost")
+    return host
 
 
-print("server IP=", HOST)
+TARGET_MAC = "00:00:00:00:00:00"
+ALT_MAC = "00:00:00:00:00:00"
 
-print("proceeding to connect to server")
 
-# HOST = '192.168.106.46'
+def _get_connection(host: str, port: int) -> socket.socket:
+    """Establish a TCP connection to the server."""
 
-# HOST = 'localhost'  # IP address of the server
-PORT = 8000         # Port to connect to
-
-# Create a TCP socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-# Connect to the server
-s.connect((HOST, PORT))
-print('Connected to server')
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((host, port))
+    logging.info("Connected to %s:%s", host, port)
+    return sock
 
 
 STOP_BUTTON = 0
 Button_state = 0  # 0-no click 1-left click 2-right click
-
-mouse_refresh_time = 0.075
-
-# Function to send mouse coordinates to the server
+MOUSE_REFRESH_TIME = 0.075
 
 win_x = 0
 win_y = 0
@@ -99,14 +92,6 @@ win_height = 1080
 
 def send_mouse_coords(conn):
 
-    global STOP_BUTTON
-    global Button_state
-    global win_x
-    global win_y
-    global win_width
-    global win_height
-
-    global mouse_refresh_time
     while True:
         # Get the current mouse position
         if STOP_BUTTON:
@@ -115,61 +100,60 @@ def send_mouse_coords(conn):
         x, y = pyautogui.position()
 
         try:
-            msg = "|"+str((x-win_x)/(win_width/1920))+":" + \
-                str((y-win_y)/(win_height/1080))+":"+str(Button_state)+"|"
-            # print(msg)
-        except:
-            pass
-        # print(msg.encode())
-        s.sendall(msg.encode())
+            msg = json.dumps(
+                {
+                    "x": (x - win_x) / (win_width / 1920),
+                    "y": (y - win_y) / (win_height / 1080),
+                    "button": Button_state,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        conn.sendall((msg + "\n").encode())
         # Wait for some time before sending the next mouse coordinates
-        time.sleep(mouse_refresh_time)
+        time.sleep(MOUSE_REFRESH_TIME)
+
 
 # Function to receive video data from the server
 
 
 def clicking(conn):
-    global STOP_BUTTON
-    global Button_state
 
     if STOP_BUTTON:
         return
 
     def on_click(x, y, button, pressed):
-        global STOP_BUTTON
         global Button_state
 
         if STOP_BUTTON:
             return
-        global win_x
-        global win_y
-        global win_width
-        global win_height
-
-        global mouse_refresh_time
 
         if pressed:
-            # print(button == Button.left)
-            print(button)
-            if (button == Button.left):
+            logging.debug("mouse button: %s", button)
+            if button == Button.left:
                 Button_state = 1
-            elif (button == Button.right):
+            elif button == Button.right:
                 Button_state = 2
             else:
                 Button_state = 0
 
             try:
-                msg = "|"+str((x-win_x)/(win_width/1920))+":" + \
-                    str((y-win_y)/(win_height/1080))+":"+str(Button_state)+"|"
-                print(msg)
-            except:
-                pass
-            # print(msg.encode())
-            s.sendall(msg.encode())
+                msg = json.dumps(
+                    {
+                        "x": (x - win_x) / (win_width / 1920),
+                        "y": (y - win_y) / (win_height / 1080),
+                        "button": Button_state,
+                    }
+                )
+                logging.debug(msg)
+            except Exception:  # noqa: BLE001
+                return
+            conn.sendall((msg + "\n").encode())
             # Wait for some time before sending the next mouse coordinates
-            time.sleep(mouse_refresh_time)
+            time.sleep(MOUSE_REFRESH_TIME)
         else:
             Button_state = 0
+
     with Listener(on_click=on_click) as listener:
         listener.join()
 
@@ -182,14 +166,14 @@ def receive_video_data(conn):
     global win_y
     global win_width
     global win_height
-    cv2.namedWindow('Screen', cv2.WINDOW_NORMAL)
+    cv2.namedWindow("Screen", cv2.WINDOW_NORMAL)
 
     win_x = cv2.getWindowImageRect("Screen")[0]
     win_y = cv2.getWindowImageRect("Screen")[1]
     win_width = cv2.getWindowImageRect("Screen")[2]
     win_height = cv2.getWindowImageRect("Screen")[3]
 
-    buffer = b''
+    buffer = b""
 
     while True:
 
@@ -202,8 +186,8 @@ def receive_video_data(conn):
         size_bytes = conn.recv(4)
         if not size_bytes:
             break
-        size = int.from_bytes(size_bytes, byteorder='big')
-        print(size)
+        size = int.from_bytes(size_bytes, byteorder="big")
+        logging.debug("frame size: %s", size)
         # Receive the JPEG buffer from the server
         while len(buffer) < size:
             data = conn.recv(min(1024, size - len(buffer)))
@@ -212,39 +196,69 @@ def receive_video_data(conn):
             buffer += data
 
         # Convert the JPEG buffer to a numpy array
-        img = cv2.imdecode(np.frombuffer(
-            buffer, dtype=np.uint8), cv2.IMREAD_COLOR)
+        img = cv2.imdecode(
+            np.frombuffer(buffer, dtype=np.uint8),
+            cv2.IMREAD_COLOR,
+        )
 
         # Display the image
-        cv2.imshow('Screen', img)
+        cv2.imshow("Screen", img)
         # cv2.waitKey(1)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             STOP_BUTTON = 1
             break
 
         # Reset the buffer for the next image
-        buffer = b''
+        buffer = b""
 
 
-# Create threads for sending mouse coordinates and receiving video data
-send_mouse_coords_thread = threading.Thread(
-    target=send_mouse_coords, args=(s,))
-receive_video_data_thread = threading.Thread(
-    target=receive_video_data, args=(s,))
-detect_mouse_click_thread = threading.Thread(
-    target=clicking, args=(s,))
+def run_client(host: str, port: int) -> None:
+    """Run the remote client against the given host."""
 
-# Start threads
-send_mouse_coords_thread.start()
-receive_video_data_thread.start()
-detect_mouse_click_thread.start()
+    conn = _get_connection(host, port)
 
-# Wait for threads to finish
-send_mouse_coords_thread.join()
-receive_video_data_thread.join()
-detect_mouse_click_thread.join()
-# Close the socket
+    send_mouse_coords_thread = threading.Thread(
+        target=send_mouse_coords, args=(conn,), daemon=True
+    )
+    receive_video_data_thread = threading.Thread(
+        target=receive_video_data, args=(conn,), daemon=True
+    )
+    detect_mouse_click_thread = threading.Thread(
+        target=clicking, args=(conn,), daemon=True
+    )
+
+    send_mouse_coords_thread.start()
+    receive_video_data_thread.start()
+    detect_mouse_click_thread.start()
+
+    send_mouse_coords_thread.join()
+    receive_video_data_thread.join()
+    detect_mouse_click_thread.join()
+
+    conn.close()
 
 
-s.close()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=("Remote device controller client")
+    )  # noqa: E501
+    parser.add_argument("--host", help="Server IP address")
+    parser.add_argument("--port", type=int, default=8000, help="Server port")
+    parser.add_argument("--mac", default=TARGET_MAC, help="Target MAC address")
+    parser.add_argument(
+        "--alt-mac",
+        default=ALT_MAC,
+        help="Alternate MAC address used in ARP table lookup",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    host = args.host or _discover_host(args.mac, args.alt_mac)
+    run_client(host, args.port)
+
+
+if __name__ == "__main__":
+    main()
